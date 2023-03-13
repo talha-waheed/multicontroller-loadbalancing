@@ -138,21 +138,14 @@ func periodicallyNotifyCentralController(notifTimeInterval time.Duration, chGetA
 	// reliably send state to the central controller
 	repeatInterval := time.Duration(notifTimeInterval)
 	repeatTicker := time.NewTicker(repeatInterval)
-	chResponse := make(chan Response)
 	chGetNumOfReqs := make(chan int)
 
 	for {
 		select {
 		case <-repeatTicker.C:
-			reliablySendState(chGetAndFlushNumOfReqs, centralControllerURL, chResponse, chGetNumOfReqs)
+			reliablySendState(chGetAndFlushNumOfReqs, centralControllerURL, chGetNumOfReqs)
 		}
 	}
-}
-
-type CentralControllerState struct {
-	podname string
-	k       int
-	a       int
 }
 
 // syncronous
@@ -218,7 +211,7 @@ func getAndFlushNumOfReqs(chGetAndFlushNumOfReqs chan chan int, chGetNumOfReqs c
 }
 
 // synchronous
-func reliablySendState(chGetAndFlushNumOfReqs chan chan int, centralControllerURL string, chResponse chan Response, chGetNumOfReqs chan int) {
+func reliablySendState(chGetAndFlushNumOfReqs chan chan int, centralControllerURL string, chGetNumOfReqs chan int) {
 
 	tryNum := 1
 	podname, err := os.Hostname()
