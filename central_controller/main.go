@@ -2,17 +2,30 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"math/rand"
 	"net/http"
 	"strconv"
+	"time"
 )
 
 type Req struct {
 	podname string
 	k       int
 	a       int
+}
+
+type Response struct {
+	ReqNum      int
+	IsError     bool
+	ErrMsg      string
+	StatusCode  int
+	Body        string
+	StartTimeNs int64
+	LatencyNs   int64
+	ReadTimeNs  int64
 }
 
 func respondWithError(w http.ResponseWriter, errStr string) {
@@ -58,57 +71,52 @@ func handleRequest(chListenReqs chan Req, w http.ResponseWriter, r *http.Request
 	respondWithSuccess(w, req)
 }
 
-type Host struct {
+type HostProps struct {
 	name         string
 	ipaddress    string
 	loadcapacity int
 	podnames     []string
 }
 
-type Pod struct {
+type PodProps struct {
 	name      string
 	ipaddress string
 	hostname  string
 	LBname    string
 }
 
-type PodProps struct {
-	ipaddress string
-	hostname  string
-	LBname    string
-}
-
 type LBProps struct {
+	name     string
 	podnames []string
 }
 
-func getInitHostPrices(hosts []Host) map[string]float64 {
+func getInitHostPrices(hosts map[string]HostProps) map[string]float64 {
 
 	initPrice := 1.0
 
 	initHostPrices := make(map[string]float64)
 
-	for i := 0; i < len(hosts); i++ {
-		initHostPrices[hosts[i].name] = initPrice
+	for hostname, _ := range hosts {
+		initHostPrices[hostname] = initPrice
 	}
 
 	return initHostPrices
 }
 
-func getInitPodLoads(pods []Pod) map[string]int {
+func getInitPodLoads(pods map[string]PodProps) map[string]int {
 
 	initReqsReceived := -1
 
 	initPodLoads := make(map[string]int)
 
-	for i := 0; i < len(pods); i++ {
-		initPodLoads[pods[i].name] = initReqsReceived
+	for podname, _ := range pods {
+		initPodLoads[podname] = initReqsReceived
 	}
 
 	return initPodLoads
 }
 
-func getAllPodLoads(pods []Pod, chListenReqs chan Req) map[string]int {
+func getAllPodLoads(pods map[string]PodProps, chListenReqs chan Req) map[string]int {
 
 	podLoads := getInitPodLoads(pods)
 
@@ -143,17 +151,17 @@ func getAllPodLoads(pods []Pod, chListenReqs chan Req) map[string]int {
 }
 
 func aggregatePodLoadstoHostLoads(
-	hosts []Host,
+	hosts map[string]HostProps,
 	podLoads map[string]int,
 ) map[string]int {
 
 	hostLoads := make(map[string]int)
 
-	for i := 0; i < len(hosts); i++ {
-		hostLoads[hosts[i].name] = 0
-		for j := 0; j < len(hosts[i].podnames); j++ {
-			podname := hosts[i].podnames[j]
-			hostLoads[hosts[i].name] += podLoads[podname]
+	for hostname, hostprops := range hosts {
+		hostLoads[hostname] = 0
+		for j := 0; j < len(hostprops.podnames); j++ {
+			podname := hostprops.podnames[j]
+			hostLoads[hostname] += podLoads[podname]
 		}
 	}
 
@@ -167,7 +175,7 @@ func getNewHostPrice(
 	hostLoadCapacity int,
 	sumOfOldHostPrices float64,
 ) float64 {
-	// Srikanth's Algorithm is implemented in this function to calculate the new host prices
+	// Prof. Srikanth's Algorithm is implemented in this function to calculate the new host prices
 
 	newPrice := math.Abs(
 		oldPrice +
@@ -179,8 +187,8 @@ func getNewHostPrice(
 }
 
 func getNewHostPrices(
-	pods []Pod,
-	hosts []Host,
+	pods map[string]PodProps,
+	hosts map[string]HostProps,
 	podLoads map[string]int,
 	oldHostPrices map[string]float64,
 ) map[string]float64 {
@@ -191,13 +199,12 @@ func getNewHostPrices(
 
 	sumOfOldHostPrices := getSumOfPrices(oldHostPrices)
 
-	for i := 0; i < len(hosts); i++ {
-		hostname := hosts[i].name
+	for hostname, hostprops := range hosts {
 		newHostPrices[hostname] = getNewHostPrice(
 			oldHostPrices[hostname],
 			1.0,
 			loadsArrivedAtHost[hostname],
-			hosts[i].loadcapacity,
+			hostprops.loadcapacity,
 			sumOfOldHostPrices,
 		)
 	}
@@ -254,16 +261,95 @@ func getShuffledArray(arr []string) []string {
 	return arr
 }
 
+func communicateOptimalHostsToLBs(LBs map[string]LBProps, optimalHostsForLBs map[string]string) {
+	// TO-DO:
+	// for each LB
+	// 		make an async request to its IP:port
+	// 			telling it the IP:port of its optimal host
+
+	numReqsCompleted := 0
+	chNotifyReqCompleted := make(chan bool)
+
+	for LBname, LBProps := range LBs {
+		go communicateHostToLB(optimalHostsForLBs[LBname], LBProps, chNotifyReqCompleted)
+	}
+
+	for {
+		<-chNotifyReqCompleted
+		numReqsCompleted++
+
+		if numReqsCompleted == len(LBs) {
+			break
+		}
+	}
+}
+
+// syncronous
+func makeRequest(reqURL string, resChan chan Response, reqNum int) {
+
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		errMsg := fmt.Sprintf("client: could not create request: %s", err)
+		resChan <- Response{reqNum,
+			true, errMsg,
+			0, "",
+			time.Now().UnixNano(), 0, 0}
+		return
+	}
+	req.Header.Set("Connection", "close")
+
+	startReq := time.Now()
+	res, err := http.DefaultClient.Do(req)
+	latency := time.Since(startReq)
+
+	if err != nil {
+		errMsg := fmt.Sprintf("client: error making http request: %s", err)
+		resChan <- Response{reqNum,
+			true, errMsg,
+			0, "",
+			startReq.UnixNano(), latency.Nanoseconds(), 0}
+		return
+	}
+
+	startRead := time.Now()
+	resBody, err := io.ReadAll(res.Body)
+	readTime := time.Since(startRead)
+
+	if err != nil {
+		errMsg := fmt.Sprintf("client: could not read response body: %s", err)
+		resChan <- Response{reqNum,
+			true, errMsg,
+			res.StatusCode, "",
+			startReq.UnixNano(), latency.Nanoseconds(), readTime.Nanoseconds()}
+		return
+	}
+
+	resChan <- Response{reqNum,
+		false, "",
+		res.StatusCode, string(resBody),
+		startReq.UnixNano(), latency.Nanoseconds(), readTime.Nanoseconds()}
+}
+
+// syncronous
+func communicateHostToLB(optimalHostName string, LBProps LBProps, chNotifyReqCompleted chan bool) {
+
+	URL := ""
+	reqNum := 1
+	chGetResponse := make(chan Response)
+
+	makeRequest(URL, chGetResponse, reqNum)
+
+	<-chGetResponse
+}
+
 func centralController(
-	hosts []Host,
-	pods []Pod,
+	hosts map[string]HostProps,
+	pods map[string]PodProps,
 	LBs map[string]LBProps,
-	podHost map[string]string,
 	chListenReqs chan Req) {
 
 	// define state at the beginning of the controller
 	hostPrices := getInitHostPrices(hosts)
-	podsMap := getPodsPropsMapped(pods)
 
 	for {
 
@@ -274,42 +360,25 @@ func centralController(
 		hostPrices = getNewHostPrices(pods, hosts, podLoads, hostPrices)
 
 		// determine what is the optimal hostname for each LB (according to lowest host price)
-		optimalHostsForLBs := getOptimalHostsForLBs(LBs, podsMap, hostPrices)
+		optimalHostsForLBs := getOptimalHostsForLBs(LBs, pods, hostPrices)
 
 		// communicate optimal hostname to each LB
 		communicateOptimalHostsToLBs(LBs, optimalHostsForLBs)
 
-		// compute theta for next hosts (implicitly done on the next iteration)
-
+		// compute theta for next hosts
+		// (no need to do this here. It is implicitly done in calculating new host prices)
 	}
-
-}
-
-func communicateOptimalHostsToLBs(LBs map[string]LBProps, optimalHostsForLBs map[string]string) {
-	panic("unimplemented")
-	// TO-DO:
-	// for each LB
-	// 		make an async request to its IP:port
-	// 			telling it the IP:port of its optimal host
-}
-
-func getPodsPropsMapped(pods []Pod) map[string]PodProps {
-
-	podMap := make(map[string]PodProps)
-	for i := 0; i < len(pods); i++ {
-		podMap[pods[i].name] = PodProps{pods[i].ipaddress, pods[i].hostname, pods[i].LBname}
-	}
-	return podMap
 }
 
 func main() {
 
+	hosts, pods, LBs := getTopology()
 	chListenReqs := make(chan Req)
 
 	/* start a thread that will process all the price updates coming
 	*  from the hosts
 	 */
-	go centralController(chListenReqs)
+	go centralController(hosts, pods, LBs, chListenReqs)
 
 	port := 3000
 
@@ -323,11 +392,17 @@ func main() {
 	}
 }
 
+func getTopology() (map[string]HostProps, map[string]PodProps, map[string]LBProps) {
+
+}
+
 /* PROBLEMS:
-*	- fixed topology
-*	- we have to manually figure our the topology
-*	- we ignore failures
-*	- we are not ensuring same k is used for calculations
-*	- we should change Host, Pod, LB to maps of [hostname]HostProps,[podname]PodProps, [LBname]LBProps
+*	- We have a fixed topology
+*	- We have to manually figure our the topology
+*	- We ignore failures
+*	- We are not ensuring same k is used for calculations
+*	- We should change Host, Pod, LB to maps of [hostname]HostProps,[podname]PodProps, [LBname]LBProps
+*	- There can be race conditions in the system between requests from pods to controller
 *	- Maybe breaking ties strategy of mine is wasting compute
+*	- Notifiying the LBs their new optimal host is done unreliably (maybe this is better to do)
  */
