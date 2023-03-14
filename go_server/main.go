@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -92,6 +93,15 @@ func main() {
 	}
 }
 
+func getCentralControllerURL() string {
+	ip := flag.String("ip", "192.168.59.101", "IP of the central controller pod")
+	flag.Parse()
+
+	port := 3000
+
+	return fmt.Sprintf("http://%s:%d", *ip, port)
+}
+
 func manageNumOfReqs(chIncrementNumOfReqs chan bool, chGetAndFlushNumOfReqs chan chan int) {
 
 	numOfReqs := 0
@@ -140,11 +150,8 @@ func periodicallyNotifyCentralController(notifTimeInterval time.Duration, chGetA
 	repeatTicker := time.NewTicker(repeatInterval)
 	chGetNumOfReqs := make(chan int)
 
-	for {
-		select {
-		case <-repeatTicker.C:
-			reliablySendState(chGetAndFlushNumOfReqs, centralControllerURL, chGetNumOfReqs)
-		}
+	for range repeatTicker.C {
+		reliablySendState(chGetAndFlushNumOfReqs, centralControllerURL, chGetNumOfReqs)
 	}
 }
 
@@ -224,8 +231,8 @@ func reliablySendState(chGetAndFlushNumOfReqs chan chan int, centralControllerUR
 	for {
 		resp := sendStateToCentralController(centralControllerURL, podname, currentTime, numOfReqs, tryNum)
 
-		log.Printf("Resonse from CC for try %d: %d [%d]: %s [%s], latency: %fms",
-			resp.StatusCode, resp.Body, resp.ErrMsg, float64(resp.LatencyNs)/1000000)
+		log.Printf("Resonse from CC for try %d: [%d] %s, {%s}, latency: %fms",
+			tryNum, resp.StatusCode, resp.Body, resp.ErrMsg, float64(resp.LatencyNs)/1000000)
 
 		if resp.StatusCode == 200 {
 			break
