@@ -1,12 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"math"
 	"math/rand"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 )
@@ -26,6 +28,25 @@ type Response struct {
 	StartTimeNs int64
 	LatencyNs   int64
 	ReadTimeNs  int64
+}
+
+type HostProps struct {
+	Name         string   `json:"name"`
+	LoadCapacity int      `json:"loadCapacity"`
+	PodNames     []string `json:"podNames"`
+}
+
+type PodProps struct {
+	Name      string `json:"name"`
+	IPAddress string `json:"ipAddress"`
+	HostName  string `json:"hostName"`
+	LBname    string `json:"lbName"`
+}
+
+type LBProps struct {
+	Name      string   `json:"name"`
+	IPAddress string   `json:"ipAddress"`
+	PodNames  []string `json:"podNames"`
 }
 
 func respondWithError(w http.ResponseWriter, errStr string) {
@@ -71,32 +92,13 @@ func handleRequest(chListenReqs chan Req, w http.ResponseWriter, r *http.Request
 	respondWithSuccess(w, req)
 }
 
-type HostProps struct {
-	name         string
-	ipaddress    string
-	loadcapacity int
-	podnames     []string
-}
-
-type PodProps struct {
-	name      string
-	ipaddress string
-	hostname  string
-	LBname    string
-}
-
-type LBProps struct {
-	name     string
-	podnames []string
-}
-
 func getInitHostPrices(hosts map[string]HostProps) map[string]float64 {
 
 	initPrice := 1.0
 
 	initHostPrices := make(map[string]float64)
 
-	for hostname, _ := range hosts {
+	for hostname := range hosts {
 		initHostPrices[hostname] = initPrice
 	}
 
@@ -109,7 +111,7 @@ func getInitPodLoads(pods map[string]PodProps) map[string]int {
 
 	initPodLoads := make(map[string]int)
 
-	for podname, _ := range pods {
+	for podname := range pods {
 		initPodLoads[podname] = initReqsReceived
 	}
 
@@ -159,8 +161,8 @@ func aggregatePodLoadstoHostLoads(
 
 	for hostname, hostprops := range hosts {
 		hostLoads[hostname] = 0
-		for j := 0; j < len(hostprops.podnames); j++ {
-			podname := hostprops.podnames[j]
+		for j := 0; j < len(hostprops.PodNames); j++ {
+			podname := hostprops.PodNames[j]
 			hostLoads[hostname] += podLoads[podname]
 		}
 	}
@@ -204,7 +206,7 @@ func getNewHostPrices(
 			oldHostPrices[hostname],
 			1.0,
 			loadsArrivedAtHost[hostname],
-			hostprops.loadcapacity,
+			hostprops.LoadCapacity,
 			sumOfOldHostPrices,
 		)
 	}
@@ -226,7 +228,7 @@ func getOptimalHostsForLBs(LBs map[string]LBProps, pods map[string]PodProps, hos
 
 	// get optimal for each LB
 	for lbName, lb := range LBs {
-		optimalHost := getLeastPricedHost(lb.podnames, pods, hostprices)
+		optimalHost := getLeastPricedHost(lb.PodNames, pods, hostprices)
 		optimalHosts[lbName] = optimalHost
 	}
 
@@ -242,7 +244,7 @@ func getLeastPricedHost(podnames []string, pods map[string]PodProps, hostprices 
 	minHost := ""
 
 	for _, podname := range podnames {
-		hostname := pods[podname].hostname
+		hostname := pods[podname].HostName
 		hostprice := hostprices[hostname]
 		if hostprice <= minPrice {
 			minPrice = hostprice
@@ -261,31 +263,8 @@ func getShuffledArray(arr []string) []string {
 	return arr
 }
 
-func communicateOptimalHostsToLBs(LBs map[string]LBProps, optimalHostsForLBs map[string]string) {
-	// TO-DO:
-	// for each LB
-	// 		make an async request to its IP:port
-	// 			telling it the IP:port of its optimal host
-
-	numReqsCompleted := 0
-	chNotifyReqCompleted := make(chan bool)
-
-	for LBname, LBProps := range LBs {
-		go communicateHostToLB(optimalHostsForLBs[LBname], LBProps, chNotifyReqCompleted)
-	}
-
-	for {
-		<-chNotifyReqCompleted
-		numReqsCompleted++
-
-		if numReqsCompleted == len(LBs) {
-			break
-		}
-	}
-}
-
 // syncronous
-func makeRequest(reqURL string, resChan chan Response, reqNum int) {
+func makeRequest(reqURL string, podIP string, resChan chan Response, reqNum int) {
 
 	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 	if err != nil {
@@ -297,6 +276,10 @@ func makeRequest(reqURL string, resChan chan Response, reqNum int) {
 		return
 	}
 	req.Header.Set("Connection", "close")
+
+	q := req.URL.Query()
+	q.Add("endpoints", podIP)
+	req.URL.RawQuery = q.Encode()
 
 	startReq := time.Now()
 	res, err := http.DefaultClient.Do(req)
@@ -330,16 +313,62 @@ func makeRequest(reqURL string, resChan chan Response, reqNum int) {
 		startReq.UnixNano(), latency.Nanoseconds(), readTime.Nanoseconds()}
 }
 
-// syncronous
-func communicateHostToLB(optimalHostName string, LBProps LBProps, chNotifyReqCompleted chan bool) {
+func getPodIPonGivenHost(
+	optimalHostName string,
+	LB LBProps,
+	pods map[string]PodProps) string {
 
-	URL := ""
+	for _, podName := range LB.PodNames {
+		if pods[podName].HostName == optimalHostName {
+			return pods[podName].IPAddress
+
+		}
+	}
+
+	return ""
+}
+
+// syncronous
+func communicateOptimalPodIPToLB(
+	optimalHostName string,
+	LB LBProps,
+	pods map[string]PodProps,
+	chNotifyReqCompleted chan bool) {
+
+	lbUrl := fmt.Sprintf("http://%s", LB.IPAddress)
+	optimalPodIP := getPodIPonGivenHost(optimalHostName, LB, pods)
 	reqNum := 1
 	chGetResponse := make(chan Response)
 
-	makeRequest(URL, chGetResponse, reqNum)
+	makeRequest(lbUrl, optimalPodIP, chGetResponse, reqNum)
 
 	<-chGetResponse
+}
+
+func communicateOptimalHostsToLBs(
+	LBs map[string]LBProps,
+	optimalHostsForLBs map[string]string,
+	pods map[string]PodProps) {
+	// TO-DO:
+	// for each LB
+	// 		make an async request to its IP:port
+	// 			telling it the IP:port of its optimal host
+
+	numReqsCompleted := 0
+	chNotifyReqCompleted := make(chan bool)
+
+	for LBname, LBProps := range LBs {
+		go communicateOptimalPodIPToLB(optimalHostsForLBs[LBname], LBProps, pods, chNotifyReqCompleted)
+	}
+
+	for {
+		<-chNotifyReqCompleted
+		numReqsCompleted++
+
+		if numReqsCompleted == len(LBs) {
+			break
+		}
+	}
 }
 
 func centralController(
@@ -363,11 +392,55 @@ func centralController(
 		optimalHostsForLBs := getOptimalHostsForLBs(LBs, pods, hostPrices)
 
 		// communicate optimal hostname to each LB
-		communicateOptimalHostsToLBs(LBs, optimalHostsForLBs)
+		communicateOptimalHostsToLBs(LBs, optimalHostsForLBs, pods)
 
 		// compute theta for next hosts
 		// (no need to do this here. It is implicitly done in calculating new host prices)
 	}
+}
+
+func getHostsListMappedToName(hostsList []HostProps) map[string]HostProps {
+	hostsMap := make(map[string]HostProps)
+	for _, hostProps := range hostsList {
+		hostsMap[hostProps.Name] = hostProps
+	}
+	return hostsMap
+}
+
+func getPodsListMappedToName(podsList []PodProps) map[string]PodProps {
+	podsMap := make(map[string]PodProps)
+	for _, podProps := range podsList {
+		podsMap[podProps.Name] = podProps
+	}
+	return podsMap
+}
+
+func getLBsListMappedToName(lbsList []LBProps) map[string]LBProps {
+	lbsMap := make(map[string]LBProps)
+	for _, lbProps := range lbsList {
+		lbsMap[lbProps.Name] = lbProps
+	}
+	return lbsMap
+}
+
+func getTopology() (map[string]HostProps, map[string]PodProps, map[string]LBProps) {
+
+	hostsJSON := os.Getenv("HOSTS")
+	var hostsList []HostProps
+	json.Unmarshal([]byte(hostsJSON), &hostsList)
+	hostsMap := getHostsListMappedToName(hostsList)
+
+	podsJSON := os.Getenv("PODS")
+	var podsList []PodProps
+	json.Unmarshal([]byte(podsJSON), &podsList)
+	podsMap := getPodsListMappedToName(podsList)
+
+	lbsJSON := os.Getenv("LBS")
+	var lbsList []LBProps
+	json.Unmarshal([]byte(lbsJSON), &lbsList)
+	lbsMap := getLBsListMappedToName(lbsList)
+
+	return hostsMap, podsMap, lbsMap
 }
 
 func main() {
@@ -390,10 +463,6 @@ func main() {
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), nil); err != nil {
 		log.Fatal(err)
 	}
-}
-
-func getTopology() (map[string]HostProps, map[string]PodProps, map[string]LBProps) {
-
 }
 
 /* PROBLEMS:
