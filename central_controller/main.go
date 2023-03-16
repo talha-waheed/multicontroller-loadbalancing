@@ -133,6 +133,7 @@ func getAllPodLoads(pods map[string]PodProps, chListenReqs chan Req) map[string]
 		_, ok := podLoads[req.podname]
 		if !ok {
 			fmt.Printf("Unrecognized pod sent request: [%s, k=%d, a=%d]. Request ignored", req.podname, req.k, req.a)
+			continue
 		}
 
 		// check if the sender is a pod we have not heard from before in this loop
