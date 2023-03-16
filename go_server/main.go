@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -71,35 +70,15 @@ func handleRequest(chIncrementNumOfReqs chan bool, w http.ResponseWriter, r *htt
 	respondWithSuccess(w, loopCount, base, exp, reqResult)
 }
 
-func main() {
-
-	portToListenOn := 3000
-	chIncrementNumOfReqs := make(chan bool)
-	chGetAndFlushNumOfReqs := make(chan chan int)
-	centralControllerURL := getCentralControllerURL()
-	notifTimeInterval := 1 * time.Second
-
-	go manageNumOfReqs(chIncrementNumOfReqs, chGetAndFlushNumOfReqs)
-
-	go periodicallyNotifyCentralController(notifTimeInterval, chGetAndFlushNumOfReqs, centralControllerURL)
-
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		handleRequest(chIncrementNumOfReqs, w, r)
-	})
-	fmt.Printf("Server running (port=%d), route: http://localhost:%d/?loopCount=1&base=8&exp=7.7\n", portToListenOn, portToListenOn)
-
-	if err := http.ListenAndServe(fmt.Sprintf(":%d", portToListenOn), nil); err != nil {
-		log.Fatal(err)
-	}
-}
-
 func getCentralControllerURL() string {
-	ip := flag.String("ip", "192.168.59.101", "IP of the central controller pod")
-	flag.Parse()
-
+	ip := os.Getenv("CENTRAL_CONTROLLER_IP")
 	port := 3000
 
-	return fmt.Sprintf("http://%s:%d", *ip, port)
+	if ip == "" {
+		ip = "10.101.101.101"
+	}
+
+	return fmt.Sprintf("http://%s:%d", ip, port)
 }
 
 func manageNumOfReqs(chIncrementNumOfReqs chan bool, chGetAndFlushNumOfReqs chan chan int) {
@@ -130,36 +109,19 @@ type Response struct {
 
 func getWaitDuration(notifTimeIntervalNs time.Duration) time.Duration {
 
-	currentTimeNs := time.Now().Nanosecond()
+	currentTimeNs := time.Now().UnixNano()
 	intervalNs := notifTimeIntervalNs.Nanoseconds()
 
-	waitIntervalNs := intervalNs - (int64(currentTimeNs) % intervalNs)
+	waitIntervalNs := intervalNs - (currentTimeNs % intervalNs)
 
 	return time.Duration(waitIntervalNs)
-}
-
-func periodicallyNotifyCentralController(notifTimeInterval time.Duration, chGetAndFlushNumOfReqs chan chan int, centralControllerURL string) {
-
-	// wait for a whole k interval of time
-	waitDuration := getWaitDuration(notifTimeInterval)
-	time.Sleep(waitDuration)
-
-	// then after every k interval of time
-	// reliably send state to the central controller
-	repeatInterval := time.Duration(notifTimeInterval)
-	repeatTicker := time.NewTicker(repeatInterval)
-	chGetNumOfReqs := make(chan int)
-
-	for range repeatTicker.C {
-		reliablySendState(chGetAndFlushNumOfReqs, centralControllerURL, chGetNumOfReqs)
-	}
 }
 
 // syncronous
 func sendStateToCentralController(
 	reqURL string,
 	podname string,
-	k int,
+	k int64,
 	a int,
 	tryNum int) Response {
 
@@ -182,7 +144,10 @@ func sendStateToCentralController(
 	req.URL.RawQuery = q.Encode()
 
 	startReq := time.Now()
-	res, err := http.DefaultClient.Do(req)
+	client := &http.Client{
+		Timeout: 500 * time.Millisecond,
+	}
+	res, err := client.Do(req)
 	latency := time.Since(startReq)
 
 	if err != nil {
@@ -226,7 +191,7 @@ func reliablySendState(chGetAndFlushNumOfReqs chan chan int, centralControllerUR
 		log.Printf("Error: couldn't look up the hostname of pod\n")
 	}
 	numOfReqs := getAndFlushNumOfReqs(chGetAndFlushNumOfReqs, chGetNumOfReqs)
-	currentTime := time.Now().Nanosecond()
+	currentTime := time.Now().UnixNano()
 
 	for {
 		resp := sendStateToCentralController(centralControllerURL, podname, currentTime, numOfReqs, tryNum)
@@ -240,8 +205,48 @@ func reliablySendState(chGetAndFlushNumOfReqs chan chan int, centralControllerUR
 
 		if tryNum >= 3 {
 			log.Printf("Error: no 200 response from CC in 3 tries. Stopping sending messages for k=%dns\n", currentTime)
+			break
 		}
 		tryNum++
+	}
+}
+
+func periodicallyNotifyCentralController(notifTimeInterval time.Duration, chGetAndFlushNumOfReqs chan chan int, centralControllerURL string) {
+
+	// wait for a whole k interval of time
+	waitDuration := getWaitDuration(notifTimeInterval)
+	time.Sleep(waitDuration)
+
+	// then after every k interval of time
+	// reliably send state to the central controller
+	repeatInterval := time.Duration(notifTimeInterval)
+	repeatTicker := time.NewTicker(repeatInterval)
+	chGetNumOfReqs := make(chan int)
+
+	for range repeatTicker.C {
+		reliablySendState(chGetAndFlushNumOfReqs, centralControllerURL, chGetNumOfReqs)
+	}
+}
+
+func main() {
+
+	portToListenOn := 3000
+	chIncrementNumOfReqs := make(chan bool)
+	chGetAndFlushNumOfReqs := make(chan chan int)
+	centralControllerURL := getCentralControllerURL()
+	notifTimeInterval := 1 * time.Second
+
+	go manageNumOfReqs(chIncrementNumOfReqs, chGetAndFlushNumOfReqs)
+
+	go periodicallyNotifyCentralController(notifTimeInterval, chGetAndFlushNumOfReqs, centralControllerURL)
+
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		handleRequest(chIncrementNumOfReqs, w, r)
+	})
+	fmt.Printf("Server running (port=%d), route: http://localhost:%d/?loopCount=1&base=8&exp=7.7\n", portToListenOn, portToListenOn)
+
+	if err := http.ListenAndServe(fmt.Sprintf(":%d", portToListenOn), nil); err != nil {
+		log.Fatal(err)
 	}
 }
 
