@@ -1,0 +1,3 @@
+[{"name": "node1", "loadCapacity": 22, "podNames": ["app1-pod1"]}, {"name": "node2", "loadCapacity": 22, "podNames": ["app1-pod2"]}],
+[{"name": "app1-pod2", "ipAddress": "localhost:3334", "hostName": "node2", "lbName": "envoy-flask-app1"}, {"name": "app1-pod1", "ipAddress": "localhost:3333", "hostName": "node1", "lbName": "envoy-flask-app1"}],
+[{"name": "envoy-flask-app1", "ipAddress": "localhost:8000", "podNames": ["app1-pod1", "app1-pod2"]}]

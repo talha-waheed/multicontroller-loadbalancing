@@ -1,4 +1,19 @@
-FROM --platform=linux/amd64 golang:1.19.5
+# FROM --platform=linux/amd64 golang
+# # FROM golang
+
+# WORKDIR /app/go-sample-app
+
+# COPY go.mod ./
+# RUN go mod download && go mod verify
+
+# COPY . .
+# RUN go install -v ./...
+
+# EXPOSE 3000
+
+# CMD ["go_server"]
+
+FROM --platform=linux/amd64 golang
 
 # RUN apk add --no-cache git
 

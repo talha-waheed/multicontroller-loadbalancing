@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -68,8 +69,6 @@ func handleRequest(chIncrementNumOfReqs chan bool, w http.ResponseWriter, r *htt
 	reqResult := processRequest(loopCountFloat, baseFloat, expFloat)
 
 	respondWithSuccess(w, loopCount, base, exp, reqResult)
-
-	chIncrementNumOfReqs <- true
 }
 
 func getCentralControllerURL() string {
@@ -77,7 +76,7 @@ func getCentralControllerURL() string {
 	port := 3000
 
 	if ip == "" {
-		ip = "10.101.101.101"
+		ip = "localhost"
 	}
 
 	return fmt.Sprintf("http://%s:%d", ip, port)
@@ -89,17 +88,11 @@ func manageNumOfReqs(chIncrementNumOfReqs chan bool, chGetAndFlushNumOfReqs chan
 
 	for {
 		select {
+		case <-chIncrementNumOfReqs:
+			numOfReqs++
 		case chReply := <-chGetAndFlushNumOfReqs:
 			chReply <- numOfReqs
 			numOfReqs = 0
-		default:
-			select {
-			case chReply := <-chGetAndFlushNumOfReqs:
-				chReply <- numOfReqs
-				numOfReqs = 0
-			case <-chIncrementNumOfReqs:
-				numOfReqs++
-			}
 		}
 	}
 }
@@ -191,35 +184,35 @@ func getAndFlushNumOfReqs(chGetAndFlushNumOfReqs chan chan int, chGetNumOfReqs c
 }
 
 // synchronous
-func reliablySendState(chGetAndFlushNumOfReqs chan chan int, centralControllerURL string, chGetNumOfReqs chan int) {
+func reliablySendState(podname string, chGetAndFlushNumOfReqs chan chan int, centralControllerURL string, chGetNumOfReqs chan int) {
 
 	tryNum := 1
-	podname, err := os.Hostname()
-	if err != nil {
-		log.Printf("Error: couldn't look up the hostname of pod\n")
-	}
+	// podname, err := os.Hostname()
+	// if err != nil {
+	// 	log.Printf("Error: couldn't look up the hostname of pod\n")
+	// }
 	numOfReqs := getAndFlushNumOfReqs(chGetAndFlushNumOfReqs, chGetNumOfReqs)
 	currentTime := time.Now().UnixNano()
 
-	for {
-		resp := sendStateToCentralController(centralControllerURL, podname, currentTime, numOfReqs, tryNum)
+	// for {
+	resp := sendStateToCentralController(centralControllerURL, podname, currentTime, numOfReqs, tryNum)
 
-		log.Printf("Resonse from CC for try %d: [%d] %s, {%s}, latency: %fms",
-			tryNum, resp.StatusCode, resp.Body, resp.ErrMsg, float64(resp.LatencyNs)/1000000)
+	log.Printf("Resonse from CC for try %d: [%d] %s, {%s}, latency: %fms",
+		tryNum, resp.StatusCode, resp.Body, resp.ErrMsg, float64(resp.LatencyNs)/1000000)
 
-		if resp.StatusCode == 200 {
-			break
-		}
+	// if resp.StatusCode == 200 {
+	// 	break
+	// }
 
-		if tryNum >= 3 {
-			log.Printf("Error: no 200 response from CC in 3 tries. Stopping sending messages for k=%dns\n", currentTime)
-			break
-		}
-		tryNum++
-	}
+	// if tryNum >= 3 {
+	// 	log.Printf("Error: no 200 response from CC in 3 tries. Stopping sending messages for k=%dns\n", currentTime)
+	// 	break
+	// }
+	// tryNum++
+	// }
 }
 
-func periodicallyNotifyCentralController(notifTimeInterval time.Duration, chGetAndFlushNumOfReqs chan chan int, centralControllerURL string) {
+func periodicallyNotifyCentralController(podname string, notifTimeInterval time.Duration, chGetAndFlushNumOfReqs chan chan int, centralControllerURL string) {
 
 	defer log.Printf("Leaving function [periodicallyNotifyCentralController]")
 
@@ -234,21 +227,29 @@ func periodicallyNotifyCentralController(notifTimeInterval time.Duration, chGetA
 	chGetNumOfReqs := make(chan int)
 
 	for range repeatTicker.C {
-		reliablySendState(chGetAndFlushNumOfReqs, centralControllerURL, chGetNumOfReqs)
+		reliablySendState(podname, chGetAndFlushNumOfReqs, centralControllerURL, chGetNumOfReqs)
 	}
+}
+
+func getFlags() (int, string) {
+	port := flag.Int("port", 3333, "Port to run on")
+	podname := flag.String("podname", "", "")
+	flag.Parse()
+	log.Println("Podname is: ", *podname)
+	return *port, *podname
 }
 
 func main() {
 
-	portToListenOn := 3000
+	portToListenOn, podname := getFlags()
 	chIncrementNumOfReqs := make(chan bool)
 	chGetAndFlushNumOfReqs := make(chan chan int)
 	centralControllerURL := getCentralControllerURL()
-	notifTimeInterval := 1 * time.Second
+	notifTimeInterval := 10 * time.Second
 
 	go manageNumOfReqs(chIncrementNumOfReqs, chGetAndFlushNumOfReqs)
 
-	go periodicallyNotifyCentralController(notifTimeInterval, chGetAndFlushNumOfReqs, centralControllerURL)
+	go periodicallyNotifyCentralController(podname, notifTimeInterval, chGetAndFlushNumOfReqs, centralControllerURL)
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		handleRequest(chIncrementNumOfReqs, w, r)

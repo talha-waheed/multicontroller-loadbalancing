@@ -8,7 +8,6 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
-	"os"
 	"strconv"
 	"time"
 )
@@ -120,6 +119,8 @@ func getInitPodLoads(pods map[string]PodProps) map[string]int {
 
 func getAllPodLoads(pods map[string]PodProps, chListenReqs chan Req) map[string]int {
 
+	defer log.Printf("Exited getAllPodLoads\n")
+
 	podLoads := getInitPodLoads(pods)
 
 	uniquePodLoadsReceived := 0
@@ -132,7 +133,7 @@ func getAllPodLoads(pods map[string]PodProps, chListenReqs chan Req) map[string]
 		// ignore this if its a pod that we don't recognize
 		_, ok := podLoads[req.podname]
 		if !ok {
-			fmt.Printf("Unrecognized pod sent request: [%s, k=%d, a=%d]. Request ignored", req.podname, req.k, req.a)
+			fmt.Printf("Unrecognized pod sent request: [%s, k=%d, a=%d]. Request ignored\n", req.podname, req.k, req.a)
 			continue
 		}
 
@@ -391,15 +392,19 @@ func centralController(
 
 		// compute price for each host
 		hostPrices = getNewHostPrices(pods, hosts, podLoads, hostPrices)
+		log.Println("Got hostPrices")
 
 		// determine what is the optimal hostname for each LB (according to lowest host price)
 		optimalHostsForLBs := getOptimalHostsForLBs(LBs, pods, hostPrices)
+		log.Println("Got optimalHostsForLBs")
 
 		// communicate optimal hostname to each LB
 		communicateOptimalHostsToLBs(LBs, optimalHostsForLBs, pods)
+		log.Println("Communicated hosts to LBs")
 
 		// compute theta for next hosts
 		// (no need to do this here. It is implicitly done in calculating new host prices)
+
 	}
 }
 
@@ -429,17 +434,18 @@ func getLBsListMappedToName(lbsList []LBProps) map[string]LBProps {
 
 func getTopology() (map[string]HostProps, map[string]PodProps, map[string]LBProps) {
 
-	hostsJSON := os.Getenv("HOSTS")
+	hostsJSON := "[{\"name\": \"node1\", \"loadCapacity\": 22, \"podNames\": [\"app1-pod1\"]}, {\"name\": \"node2\", \"loadCapacity\": 22, \"podNames\": [\"app1-pod2\"]}]"
+	podsJSON := "[{\"name\": \"app1-pod2\", \"ipAddress\": \"3334\", \"hostName\": \"node2\", \"lbName\": \"envoy-flask-app1\"}, {\"name\": \"app1-pod1\", \"ipAddress\": \"3333\", \"hostName\": \"node1\", \"lbName\": \"envoy-flask-app1\"}]"
+	lbsJSON := "[{\"name\": \"envoy-flask-app1\", \"ipAddress\": \"localhost:8000\", \"podNames\": [\"app1-pod1\", \"app1-pod2\"]}]"
+
 	var hostsList []HostProps
 	json.Unmarshal([]byte(hostsJSON), &hostsList)
 	hostsMap := getHostsListMappedToName(hostsList)
 
-	podsJSON := os.Getenv("PODS")
 	var podsList []PodProps
 	json.Unmarshal([]byte(podsJSON), &podsList)
 	podsMap := getPodsListMappedToName(podsList)
 
-	lbsJSON := os.Getenv("LBS")
 	var lbsList []LBProps
 	json.Unmarshal([]byte(lbsJSON), &lbsList)
 	lbsMap := getLBsListMappedToName(lbsList)
@@ -455,7 +461,6 @@ func logTopology(
 	log.Println("hosts: ", hosts)
 	log.Println("pods: ", pods)
 	log.Println("LBs: ", LBs)
-
 }
 
 func main() {
