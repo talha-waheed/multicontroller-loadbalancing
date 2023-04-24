@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -9,6 +10,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 func processRequest(totalLoopCount, base, exp float64) float64 {
@@ -54,22 +57,36 @@ func respondWithSuccess(w http.ResponseWriter, loopCount string, base string, ex
 	fmt.Fprintf(w, "Processed at %s w/ loopCount=%s & compute=(%s,%s) => %f", getHostName(), loopCount, base, exp, reqResult)
 }
 
-func handleRequest(chIncrementNumOfReqs chan bool, w http.ResponseWriter, r *http.Request) {
+func handleRequest(rds *redis.Client, w http.ResponseWriter, r *http.Request) {
+
+	err := rds.Incr(context.Background(), "outstanding_requests")
+	if err != nil {
+		log.Printf("Error: couldn't increment variable in Redis\n")
+	}
+
 	loopCount := r.URL.Query().Get("loopCount")
 	base := r.URL.Query().Get("base")
 	exp := r.URL.Query().Get("exp")
 
 	loopCountFloat, baseFloat, expFloat, isErr := convParamsToFloat(loopCount, base, exp)
 	if isErr {
+		err := rds.Decr(context.Background(), "outstanding_requests")
+		if err != nil {
+			log.Printf("Error: couldn't decr variable in Redis\n")
+		}
 		respondWithError(w, loopCount, base, exp)
 		return
 	}
 
 	reqResult := processRequest(loopCountFloat, baseFloat, expFloat)
 
+	err = rds.Decr(context.Background(), "outstanding_requests")
+	if err != nil {
+		log.Printf("Error: couldn't decr variable in Redis\n")
+	}
 	respondWithSuccess(w, loopCount, base, exp, reqResult)
 
-	chIncrementNumOfReqs <- true
+	// chIncrementNumOfReqs <- true
 }
 
 func getCentralControllerURL() string {
@@ -238,20 +255,29 @@ func periodicallyNotifyCentralController(notifTimeInterval time.Duration, chGetA
 	}
 }
 
+func getRedisClient() *redis.Client {
+	return redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "", // no password set
+		DB:       0,  // use default DB
+	})
+}
+
 func main() {
 
 	portToListenOn := 3000
-	chIncrementNumOfReqs := make(chan bool)
-	chGetAndFlushNumOfReqs := make(chan chan int)
-	centralControllerURL := getCentralControllerURL()
-	notifTimeInterval := 1 * time.Second
 
-	go manageNumOfReqs(chIncrementNumOfReqs, chGetAndFlushNumOfReqs)
+	// chIncrementNumOfReqs := make(chan bool)
+	// chGetAndFlushNumOfReqs := make(chan chan int)
+	// centralControllerURL := getCentralControllerURL()
+	// notifTimeInterval := 1 * time.Second
+	// go manageNumOfReqs(chIncrementNumOfReqs, chGetAndFlushNumOfReqs)
+	// go periodicallyNotifyCentralController(notifTimeInterval, chGetAndFlushNumOfReqs, centralControllerURL)
 
-	go periodicallyNotifyCentralController(notifTimeInterval, chGetAndFlushNumOfReqs, centralControllerURL)
+	rds := getRedisClient()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		handleRequest(chIncrementNumOfReqs, w, r)
+		handleRequest(rds, w, r)
 	})
 	fmt.Printf("Server running (port=%d), route: http://localhost:%d/?loopCount=1&base=8&exp=7.7\n", portToListenOn, portToListenOn)
 
