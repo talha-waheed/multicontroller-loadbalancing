@@ -14,6 +14,8 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+var ctx = context.Background()
+
 func processRequest(totalLoopCount, base, exp float64) float64 {
 	resultSum := 0.0
 	for loopCount := 0.0; loopCount < totalLoopCount; loopCount++ {
@@ -59,7 +61,7 @@ func respondWithSuccess(w http.ResponseWriter, loopCount string, base string, ex
 
 func handleRequest(rds *redis.Client, w http.ResponseWriter, r *http.Request) {
 
-	err := rds.Incr(context.Background(), "outstanding_requests")
+	_, err := rds.Incr(ctx, "outstanding_requests").Result()
 	if err != nil {
 		log.Printf("Error: couldn't increment variable in Redis\n")
 	}
@@ -70,7 +72,7 @@ func handleRequest(rds *redis.Client, w http.ResponseWriter, r *http.Request) {
 
 	loopCountFloat, baseFloat, expFloat, isErr := convParamsToFloat(loopCount, base, exp)
 	if isErr {
-		err := rds.Decr(context.Background(), "outstanding_requests")
+		_, err := rds.Decr(ctx, "outstanding_requests").Result()
 		if err != nil {
 			log.Printf("Error: couldn't decr variable in Redis\n")
 		}
@@ -80,7 +82,7 @@ func handleRequest(rds *redis.Client, w http.ResponseWriter, r *http.Request) {
 
 	reqResult := processRequest(loopCountFloat, baseFloat, expFloat)
 
-	err = rds.Decr(context.Background(), "outstanding_requests")
+	_, err = rds.Decr(ctx, "outstanding_requests").Result()
 	if err != nil {
 		log.Printf("Error: couldn't decr variable in Redis\n")
 	}

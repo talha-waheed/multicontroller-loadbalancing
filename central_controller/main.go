@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,7 +12,11 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
+
+var ctx = context.Background()
 
 type Req struct {
 	podname string
@@ -118,6 +123,44 @@ func getInitPodLoads(pods map[string]PodProps) map[string]int {
 	return initPodLoads
 }
 
+// function to repeatedly fo something every 1s
+func doEvery(d time.Duration, f func(time.Time)) {
+	for x := range time.Tick(d) {
+		f(x)
+	}
+}
+
+func getHostLoads(
+	hosts map[string]HostProps,
+	redisClients map[string]*redis.Client) map[string]int {
+
+	// get all host loads from all hosts
+	hostLoads := make(map[string]int)
+
+	for hostName, client := range redisClients {
+
+		hostLoad, err := client.Get(ctx, "outstanding_requests").Result()
+		if err == redis.Nil {
+			log.Println("outstanding_requests does not exist")
+			hostLoad = "0"
+		} else if err != nil {
+			hostLoad = "0"
+			log.Printf("Error: couldn't get variable from Redis\n")
+		}
+
+		log.Printf("%s: outstanding_requests = %s\n", hostName, hostLoad)
+
+		hostLoadInt, err2 := strconv.Atoi(hostLoad)
+		if err2 != nil {
+			log.Printf("Error: couldn't convert outstanding_requests (%s) to int\n", hostLoad)
+			continue
+		}
+		hostLoads[hostName] = hostLoadInt
+	}
+
+	return hostLoads
+}
+
 func getAllPodLoads(pods map[string]PodProps, chListenReqs chan Req) map[string]int {
 
 	podLoads := getInitPodLoads(pods)
@@ -192,11 +235,11 @@ func getNewHostPrice(
 func getNewHostPrices(
 	pods map[string]PodProps,
 	hosts map[string]HostProps,
-	podLoads map[string]int,
+	hostLoads map[string]int,
 	oldHostPrices map[string]float64,
 ) map[string]float64 {
 
-	loadsArrivedAtHost := aggregatePodLoadstoHostLoads(hosts, podLoads)
+	loadsArrivedAtHost := hostLoads
 
 	newHostPrices := make(map[string]float64)
 
@@ -379,18 +422,24 @@ func centralController(
 	hosts map[string]HostProps,
 	pods map[string]PodProps,
 	LBs map[string]LBProps,
-	chListenReqs chan Req) {
+	chListenReqs chan Req,
+	redisClients map[string]*redis.Client) {
 
 	// define state at the beginning of the controller
 	hostPrices := getInitHostPrices(hosts)
 
-	for {
+	duration := 1000 * time.Millisecond
+
+	for t := range time.Tick(duration) {
+
+		// print the current time
+		log.Printf("CC logic starting [time: %s]\n", t)
 
 		// wait for each pod to send state (# of reqs it received in time k)
-		podLoads := getAllPodLoads(pods, chListenReqs)
+		hostLoads := getHostLoads(hosts, redisClients)
 
 		// compute price for each host
-		hostPrices = getNewHostPrices(pods, hosts, podLoads, hostPrices)
+		hostPrices = getNewHostPrices(pods, hosts, hostLoads, hostPrices)
 
 		// determine what is the optimal hostname for each LB (according to lowest host price)
 		optimalHostsForLBs := getOptimalHostsForLBs(LBs, pods, hostPrices)
@@ -458,6 +507,32 @@ func logTopology(
 
 }
 
+func getRedisIP(hostName string) string {
+	if hostName == "minikube-m02" {
+		return "10.101.102.101"
+	} else if hostName == "minikube-m03" {
+		return "10.101.102.102"
+	} else if hostName == "minikube-m04" {
+		return "10.101.102.103"
+	} else {
+		return "localhost"
+	}
+}
+
+func getRedisClientsForHosts(hosts map[string]HostProps) map[string]*redis.Client {
+	redisClients := make(map[string]*redis.Client)
+
+	for _, hostProps := range hosts {
+		redisClients[hostProps.Name] = redis.NewClient(&redis.Options{
+			Addr:     fmt.Sprintf("%s:6379", getRedisIP(hostProps.Name)),
+			Password: "",
+			DB:       0,
+		})
+	}
+
+	return redisClients
+}
+
 func main() {
 
 	hosts, pods, LBs := getTopology()
@@ -465,10 +540,12 @@ func main() {
 
 	chListenReqs := make(chan Req)
 
+	redisClients := getRedisClientsForHosts(hosts)
+
 	/* start a thread that will process all the price updates coming
 	*  from the hosts
 	 */
-	go centralController(hosts, pods, LBs, chListenReqs)
+	go centralController(hosts, pods, LBs, chListenReqs, redisClients)
 
 	port := 3000
 
