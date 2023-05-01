@@ -255,13 +255,65 @@ func periodicallyNotifyCentralController(notifTimeInterval time.Duration, chGetA
 	}
 }
 
+func getRedisIPFromNodeName(nodeName string) string {
+	if nodeName == "minikube-m02" {
+		return "10.101.102.101"
+	} else if nodeName == "minikube-m03" {
+		return "10.101.102.102"
+	} else if nodeName == "minikube-m04" {
+		return "10.101.102.103"
+	} else {
+		return "localhost"
+	}
+}
+
 func getRedisClient() *redis.Client {
-	return redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
+
+	myNodeName := os.Getenv("MY_NODE_NAME")
+	redisIP := getRedisIPFromNodeName(myNodeName)
+	redisPort := ":6379"
+
+	rds := redis.NewClient(&redis.Options{
+		Addr:     redisIP + redisPort,
 		Password: "", // no password set
 		DB:       0,  // use default DB
 	})
+
+	log.Printf("Redis client created for %s\n", redisIP+redisPort)
+
+	return rds
+
+	// hostname, err := os.Hostname()
+	// if err != nil {
+	// 	hostname = "error getting hostname"
+	// }
+
+	// // redisIPs := [3]string{"10.101.102.101", "10.101.102.102", "10.101.102.103"}
+	// redisIPs := [3]string{"10.101.102.101", "10.101.102.102", "10.101.102.103"}
+
+	// for _, redisIP := range redisIPs {
+	// 	addr := redisIP + ":6379"
+	// 	rds := redis.NewClient(&redis.Options{
+	// 		Addr:     addr,
+	// 		Password: "", // no password set
+	// 		DB:       0,  // use default DB
+	// 	})
+	// 	if err := rds.Ping(context.Background()).Err(); err != nil {
+	// 		log.Printf("%s: could not connect to redis server at %s [%s]\n",
+	// 			hostname, addr, err)
+	// 	} else {
+	// 		log.Printf("%s: connected to redis server at %s\n", hostname, addr)
+	// 		return rds
+	// 	}
+	// }
+
+	// log.Fatalln("Error: could not connect to any redis server")
+	// return nil
 }
+
+// func main() {
+// 	getRedisClient()
+// }
 
 func main() {
 
