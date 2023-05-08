@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -47,24 +48,65 @@ func getHostName() string {
 	return hostname
 }
 
-func respondWithError(w http.ResponseWriter, loopCount string, base string, exp string) {
+func respondWithError(
+	w http.ResponseWriter,
+	loopCount string,
+	base string,
+	exp string,
+	numOutstandingReqs int64) {
+
 	w.WriteHeader(http.StatusBadRequest)
 	w.Header().Set("Connection", "close")
-	fmt.Fprintf(w, "Error at %s w/ loopCount=%s & compute=(%s,%s)", getHostName(), loopCount, base, exp)
+	fmt.Fprintf(
+		w,
+		"Error at %s w/ loopCount=%s & compute=(%s,%s) (outstanding requests: %d)",
+		getHostName(), loopCount, base, exp, numOutstandingReqs)
 }
 
-func respondWithSuccess(w http.ResponseWriter, loopCount string, base string, exp string, reqResult float64) {
+func respondWithSuccess(
+	w http.ResponseWriter,
+	loopCount string,
+	base string,
+	exp string,
+	reqResult float64,
+	numOutstandingReqs int64) {
+
 	w.WriteHeader(http.StatusOK)
 	w.Header().Set("Connection", "close")
-	fmt.Fprintf(w, "Processed at %s w/ loopCount=%s & compute=(%s,%s) => %f", getHostName(), loopCount, base, exp, reqResult)
+	fmt.Fprintf(
+		w,
+		"Processed at %s w/ loopCount=%s & compute=(%s,%s) => %f (outstanding requests: %d)",
+		getHostName(), loopCount, base, exp, reqResult, numOutstandingReqs)
 }
 
-func handleRequest(rds *redis.Client, w http.ResponseWriter, r *http.Request) {
+type RedisClient struct {
+	mu     sync.Mutex
+	client *redis.Client
+}
 
-	_, err := rds.Incr(ctx, "outstanding_requests").Result()
+func (rds *RedisClient) IncrRds(key string) int64 {
+	rds.mu.Lock()
+	numOutstandingReqs, err := rds.client.Incr(ctx, key).Result()
+	rds.mu.Unlock()
 	if err != nil {
 		log.Printf("Error: couldn't increment variable in Redis\n")
+		numOutstandingReqs = 0
 	}
+	return numOutstandingReqs
+}
+
+func (rds *RedisClient) DecrRds(key string) {
+	rds.mu.Lock()
+	_, err := rds.client.Decr(ctx, key).Result()
+	rds.mu.Unlock()
+	if err != nil {
+		log.Printf("Error: couldn't decr variable in Redis\n")
+	}
+}
+
+func handleRequest(rds *RedisClient, w http.ResponseWriter, r *http.Request) {
+
+	numOutstandingReqs := rds.IncrRds("outstanding_requests")
 
 	loopCount := r.URL.Query().Get("loopCount")
 	base := r.URL.Query().Get("base")
@@ -72,23 +114,15 @@ func handleRequest(rds *redis.Client, w http.ResponseWriter, r *http.Request) {
 
 	loopCountFloat, baseFloat, expFloat, isErr := convParamsToFloat(loopCount, base, exp)
 	if isErr {
-		_, err := rds.Decr(ctx, "outstanding_requests").Result()
-		if err != nil {
-			log.Printf("Error: couldn't decr variable in Redis\n")
-		}
-		respondWithError(w, loopCount, base, exp)
-		return
+		rds.DecrRds("outstanding_requests")
+		respondWithError(w, loopCount, base, exp, numOutstandingReqs)
+	} else {
+		reqResult := processRequest(loopCountFloat, baseFloat, expFloat)
+
+		rds.DecrRds("outstanding_requests")
+		respondWithSuccess(w, loopCount, base, exp, reqResult, numOutstandingReqs)
+		// chIncrementNumOfReqs <- true
 	}
-
-	reqResult := processRequest(loopCountFloat, baseFloat, expFloat)
-
-	_, err = rds.Decr(ctx, "outstanding_requests").Result()
-	if err != nil {
-		log.Printf("Error: couldn't decr variable in Redis\n")
-	}
-	respondWithSuccess(w, loopCount, base, exp, reqResult)
-
-	// chIncrementNumOfReqs <- true
 }
 
 func getCentralControllerURL() string {
@@ -328,10 +362,10 @@ func main() {
 	// go manageNumOfReqs(chIncrementNumOfReqs, chGetAndFlushNumOfReqs)
 	// go periodicallyNotifyCentralController(notifTimeInterval, chGetAndFlushNumOfReqs, centralControllerURL)
 
-	rds := getRedisClient()
+	rds := RedisClient{client: getRedisClient()}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		handleRequest(rds, w, r)
+		handleRequest(&rds, w, r)
 	})
 	fmt.Printf("Server running (port=%d), route: http://localhost:%d/?loopCount=1&base=8&exp=7.7\n", portToListenOn, portToListenOn)
 
