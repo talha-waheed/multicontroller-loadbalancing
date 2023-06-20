@@ -53,14 +53,15 @@ func respondWithError(
 	loopCount string,
 	base string,
 	exp string,
-	numOutstandingReqs int64) {
+	numOutstandingReqs int64,
+	timeOutStandingReqs int64) {
 
 	w.WriteHeader(http.StatusBadRequest)
 	w.Header().Set("Connection", "close")
 	fmt.Fprintf(
 		w,
-		"Error at %s w/ loopCount=%s & compute=(%s,%s) (outstanding requests: %d)",
-		getHostName(), loopCount, base, exp, numOutstandingReqs)
+		"Error at %s w/ loopCount=%s & compute=(%s,%s) (outstanding requests: %d at %d)",
+		getHostName(), loopCount, base, exp, numOutstandingReqs, timeOutStandingReqs)
 }
 
 func respondWithSuccess(
@@ -69,14 +70,15 @@ func respondWithSuccess(
 	base string,
 	exp string,
 	reqResult float64,
-	numOutstandingReqs int64) {
+	numOutstandingReqs int64,
+	timeOutStandingReqs int64) {
 
 	w.WriteHeader(http.StatusOK)
 	w.Header().Set("Connection", "close")
 	fmt.Fprintf(
 		w,
-		"Processed at %s w/ loopCount=%s & compute=(%s,%s) => %f (outstanding requests: %d)",
-		getHostName(), loopCount, base, exp, reqResult, numOutstandingReqs)
+		"Processed at %s w/ loopCount=%s & compute=(%s,%s) => %f (outstanding requests: %d at %d)",
+		getHostName(), loopCount, base, exp, reqResult, numOutstandingReqs, timeOutStandingReqs)
 }
 
 type RedisClient struct {
@@ -107,6 +109,7 @@ func (rds *RedisClient) DecrRds(key string) {
 func handleRequest(rds *RedisClient, w http.ResponseWriter, r *http.Request) {
 
 	numOutstandingReqs := rds.IncrRds("outstanding_requests")
+	currentTime := time.Now().UnixNano()
 
 	loopCount := r.URL.Query().Get("loopCount")
 	base := r.URL.Query().Get("base")
@@ -115,12 +118,12 @@ func handleRequest(rds *RedisClient, w http.ResponseWriter, r *http.Request) {
 	loopCountFloat, baseFloat, expFloat, isErr := convParamsToFloat(loopCount, base, exp)
 	if isErr {
 		rds.DecrRds("outstanding_requests")
-		respondWithError(w, loopCount, base, exp, numOutstandingReqs)
+		respondWithError(w, loopCount, base, exp, numOutstandingReqs, currentTime)
 	} else {
 		reqResult := processRequest(loopCountFloat, baseFloat, expFloat)
 
 		rds.DecrRds("outstanding_requests")
-		respondWithSuccess(w, loopCount, base, exp, reqResult, numOutstandingReqs)
+		respondWithSuccess(w, loopCount, base, exp, reqResult, numOutstandingReqs, currentTime)
 		// chIncrementNumOfReqs <- true
 	}
 }
@@ -292,15 +295,23 @@ func periodicallyNotifyCentralController(notifTimeInterval time.Duration, chGetA
 }
 
 func getRedisIPFromNodeName(nodeName string) string {
-	if nodeName == "minikube-m02" {
-		return "10.101.102.101"
-	} else if nodeName == "minikube-m03" {
-		return "10.101.102.102"
-	} else if nodeName == "minikube-m04" {
-		return "10.101.102.103"
-	} else {
-		return "localhost"
+	// if nodeName == "minikube-m02" {
+	// 	return "10.101.102.101"
+	// } else if nodeName == "minikube-m03" {
+	// 	return "10.101.102.102"
+	// } else if nodeName == "minikube-m04" {
+	// 	return "10.101.102.103"
+	// } else {
+	// 	return "localhost"
+	// }
+
+	nodeInt, err := strconv.Atoi(nodeName[10:])
+	if err != nil {
+		panic(err)
 	}
+	nodeIPSuffix := (nodeInt - 1) + 100
+	redisIP := fmt.Sprintf("10.101.102.%d", nodeIPSuffix)
+	return redisIP
 }
 
 func getRedisClient() *redis.Client {
