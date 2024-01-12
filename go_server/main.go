@@ -106,9 +106,10 @@ func (rds *RedisClient) DecrRds(key string) {
 	}
 }
 
-func handleRequest(rds *RedisClient, w http.ResponseWriter, r *http.Request) {
+func handleRequest(w http.ResponseWriter, r *http.Request) {
 
-	numOutstandingReqs := rds.IncrRds("outstanding_requests")
+	// numOutstandingReqs := rds.IncrRds("outstanding_requests")
+	numOutstandingReqs := int64(-1)
 	currentTime := time.Now().UnixNano()
 
 	loopCount := r.URL.Query().Get("loopCount")
@@ -117,12 +118,12 @@ func handleRequest(rds *RedisClient, w http.ResponseWriter, r *http.Request) {
 
 	loopCountFloat, baseFloat, expFloat, isErr := convParamsToFloat(loopCount, base, exp)
 	if isErr {
-		rds.DecrRds("outstanding_requests")
+		// rds.DecrRds("outstanding_requests")
 		respondWithError(w, loopCount, base, exp, numOutstandingReqs, currentTime)
 	} else {
 		reqResult := processRequest(loopCountFloat, baseFloat, expFloat)
 
-		rds.DecrRds("outstanding_requests")
+		// rds.DecrRds("outstanding_requests")
 		respondWithSuccess(w, loopCount, base, exp, reqResult, numOutstandingReqs, currentTime)
 		// chIncrementNumOfReqs <- true
 	}
@@ -373,10 +374,10 @@ func main() {
 	// go manageNumOfReqs(chIncrementNumOfReqs, chGetAndFlushNumOfReqs)
 	// go periodicallyNotifyCentralController(notifTimeInterval, chGetAndFlushNumOfReqs, centralControllerURL)
 
-	rds := RedisClient{client: getRedisClient()}
+	// rds := RedisClient{client: getRedisClient()}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		handleRequest(&rds, w, r)
+		handleRequest(w, r)
 	})
 	fmt.Printf("Server running (port=%d), route: http://localhost:%d/?loopCount=1&base=8&exp=7.7\n", portToListenOn, portToListenOn)
 
