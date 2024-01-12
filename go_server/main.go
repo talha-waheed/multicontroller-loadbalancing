@@ -304,12 +304,12 @@ func getRedisIPFromNodeName(nodeName string) string {
 	// } else {
 	// 	return "localhost"
 	// }
-
 	nodeInt, err := strconv.Atoi(nodeName[10:])
+	// nodeInt, err := strconv.Atoi(nodeName[29:30])
 	if err != nil {
 		panic(err)
 	}
-	nodeIPSuffix := (nodeInt - 1) + 100
+	nodeIPSuffix := nodeInt + 100
 	redisIP := fmt.Sprintf("10.101.102.%d", nodeIPSuffix)
 	return redisIP
 }

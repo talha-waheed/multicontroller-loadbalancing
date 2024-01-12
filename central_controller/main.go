@@ -422,15 +422,14 @@ func centralController(
 	hosts map[string]HostProps,
 	pods map[string]PodProps,
 	LBs map[string]LBProps,
+	interval time.Duration,
 	chListenReqs chan Req,
 	redisClients map[string]*redis.Client) {
 
 	// define state at the beginning of the controller
 	hostPrices := getInitHostPrices(hosts)
 
-	duration := 1000 * time.Millisecond
-
-	for t := range time.Tick(duration) {
+	for t := range time.Tick(interval) {
 
 		// print the current time
 		log.Printf("CC logic starting [time: %s]\n", t)
@@ -533,6 +532,14 @@ func getRedisClientsForHosts(hosts map[string]HostProps) map[string]*redis.Clien
 	return redisClients
 }
 
+func getInterval() time.Duration {
+	intervalMs, err := strconv.Atoi(os.Getenv("INTERVAL_MS"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	return time.Duration(intervalMs) * time.Millisecond
+}
+
 func main() {
 
 	hosts, pods, LBs := getTopology()
@@ -542,10 +549,12 @@ func main() {
 
 	redisClients := getRedisClientsForHosts(hosts)
 
+	interval := getInterval()
+
 	/* start a thread that will process all the price updates coming
 	*  from the hosts
 	 */
-	go centralController(hosts, pods, LBs, chListenReqs, redisClients)
+	go centralController(hosts, pods, LBs, interval, chListenReqs, redisClients)
 
 	port := 3000
 
