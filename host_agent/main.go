@@ -189,7 +189,11 @@ func parsePodShares(msg string) (map[string]string, bool) {
 		if len(podNameToShare) != 2 {
 			return podShares, false
 		}
-		podShares[podNameToShare[0]] = podNameToShare[1]
+		share, err := strconv.ParseFloat(podNameToShare[1], 64)
+		if err != nil {
+			return podShares, false
+		}
+		podShares[podNameToShare[0]] = string(int64(share))
 	}
 
 	return podShares, true
